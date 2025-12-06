@@ -1,24 +1,120 @@
+import os
 import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-def extract_nav_data(excel_file, sheet_name="NAV Data"):
-    # Read without header, then set row 1 as header (typical AMFI layout)
-    df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
-    df.columns = df.iloc[1].values
-    df = df.iloc[2:].reset_index(drop=True)
+# ---------- STEP 1: FLATTEN / UNMERGE MERGED CELLS ----------
 
-    # Keep only rows with actual NAV values
+def flatten_merged_cells(input_file, sheet_name="NAV Data"):
+    """
+    Open Excel, unmerge all merged cells in the given sheet,
+    and fill all cells in those ranges with the top-left value.
+    Returns path of a temporary 'flattened' copy.
+    """
+    wb = openpyxl.load_workbook(input_file)
+    ws = wb[sheet_name]
+
+    # Copy merged ranges first, because we'll modify them in the loop
+    merged_ranges = list(ws.merged_cells.ranges)
+
+    for merged_range in merged_ranges:
+        # Bounds of the merged block
+        min_row = merged_range.min_row
+        min_col = merged_range.min_col
+        max_row = merged_range.max_row
+        max_col = merged_range.max_col
+
+        # Value from top-left cell
+        top_left_value = ws.cell(row=min_row, column=min_col).value
+
+        # Collect all cell coordinates BEFORE unmerging
+        cells_to_fill = [
+            (r, c)
+            for r in range(min_row, max_row + 1)
+            for c in range(min_col, max_col + 1)
+        ]
+
+        # Unmerge this range
+        ws.unmerge_cells(range_string=str(merged_range))
+
+        # Now all cells are normal (not MergedCell), safe to write
+        for r, c in cells_to_fill:
+            ws.cell(row=r, column=c).value = top_left_value
+
+    # Save to a temporary "flat" file
+    base, ext = os.path.splitext(input_file)
+    flat_file = base + "_flat" + ext
+    wb.save(flat_file)
+    return flat_file
+
+
+# ---------- STEP 2: EXTRACT ONLY NAV ROWS ----------
+
+def extract_nav_data(excel_file, sheet_name="NAV Data"):
+    """
+    1) Flatten merged cells
+    2) Read with pandas
+    3) Detect header row (contains 'NAV Name')
+    4) Keep only rows with NAV values
+    """
+    # First flatten merged cells into a temp file
+    flat_file = flatten_merged_cells(excel_file, sheet_name=sheet_name)
+
+    # Read raw sheet without header
+    df_raw = pd.read_excel(flat_file, sheet_name=sheet_name, header=None)
+
+    # Drop completely empty rows
+    df_raw = df_raw.dropna(how="all")
+
+    # Find index of row that contains 'NAV Name'
+    header_row_mask = df_raw.apply(
+        lambda r: r.astype(str).str.contains("NAV Name", case=False, na=False).any(),
+        axis=1
+    )
+    header_rows = header_row_mask[header_row_mask].index.tolist()
+    if not header_rows:
+        raise ValueError(f"'NAV Name' header not found in file: {excel_file}")
+    header_row_idx = header_rows[0]
+
+    # Use that row as header
+    df_raw.columns = df_raw.iloc[header_row_idx].values
+    df = df_raw.iloc[header_row_idx + 1:].reset_index(drop=True)
+
+    # Clean column names
+    df.columns = df.columns.astype(str).str.strip()
+
+    # Expect standard columns
+    if "NAV Name" not in df.columns or "Net Asset Value" not in df.columns:
+        raise ValueError(
+            f"Expected columns 'NAV Name' and 'Net Asset Value' not found in file: {excel_file}"
+        )
+
+    # Keep only relevant columns
     df = df[["NAV Name", "Net Asset Value"]].copy()
+
+    # Keep rows with actual NAV values
     df = df[df["Net Asset Value"].notna()]
 
+    # Rename for consistency
     df = df.rename(columns={
         "NAV Name": "Mutual Fund Name",
         "Net Asset Value": "NAV"
     })
-    df["NAV"] = df["NAV"].astype(float)
+
+    # Convert NAV to numeric, drop invalid rows
+    df["NAV"] = pd.to_numeric(df["NAV"], errors="coerce")
+    df = df[df["NAV"].notna()]
+
+    # Drop blank fund names
+    df = df[df["Mutual Fund Name"].notna()]
+
+    # Drop duplicate fund names if any
+    df = df.drop_duplicates(subset=["Mutual Fund Name"])
 
     return df
+
+
+# ---------- STEP 3: FORMAT THE OUTPUT EXCEL ----------
 
 def format_excel_output(df, output_file):
     # Write to Excel
@@ -46,6 +142,7 @@ def format_excel_output(df, output_file):
     green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
     red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 
+    # Data rows styling
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
         for col_idx, cell in enumerate(row, start=1):
             cell.border = border
@@ -71,8 +168,13 @@ def format_excel_output(df, output_file):
     for col in ["B", "C", "D", "E"]:
         ws.column_dimensions[col].width = 15
 
+    # Auto filter
     ws.auto_filter.ref = f"A1:E{ws.max_row}"
+
     wb.save(output_file)
+
+
+# ---------- STEP 4: MAIN COMPARISON LOGIC ----------
 
 def compare_nav_files(latest_file, past_file, output_file="NAV_Comparison_Result.xlsx"):
     latest_df = extract_nav_data(latest_file)
@@ -89,12 +191,15 @@ def compare_nav_files(latest_file, past_file, output_file="NAV_Comparison_Result
     )
 
     merged["Change"] = merged["Latest NAV"] - merged["Past NAV"]
-    merged["Change %"] = (merged["Change"] / merged["Past NAV"] * 100).round(2)
+    merged["Change %"] = (merged["Change"] / merged["Past NAV"] * 100)
 
+    # Rounding
     merged["Latest NAV"] = merged["Latest NAV"].round(4)
     merged["Past NAV"] = merged["Past NAV"].round(4)
     merged["Change"] = merged["Change"].round(4)
+    merged["Change %"] = merged["Change %"].round(2)
 
+    # Final column order & sorting
     merged = merged[
         ["Mutual Fund Name", "Latest NAV", "Past NAV", "Change", "Change %"]
     ].sort_values("Change %", ascending=False)
@@ -102,7 +207,12 @@ def compare_nav_files(latest_file, past_file, output_file="NAV_Comparison_Result
     format_excel_output(merged, output_file)
     return merged
 
+
+# ---------- STEP 5: ENTRY POINT (for GitHub Action / local run) ----------
+
 if __name__ == "__main__":
+    # These are the files your GitHub repo / local setup should have
     latest_file = "data/latest_nav.xlsx"
     past_file   = "data/past_nav.xlsx"
+
     compare_nav_files(latest_file, past_file, output_file="NAV_Comparison_Result.xlsx")
