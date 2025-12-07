@@ -3,6 +3,24 @@ import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
+# ---------- HELPER: NORMALIZE SCHEME NAMES FOR MATCHING ----------
+
+def normalize_name(s):
+    """
+    Normalize scheme / fund names so minor differences don't break matching.
+    - Uppercase
+    - Strip spaces
+    - Collapse multiple spaces
+    """
+    if pd.isna(s):
+        return None
+    s = str(s).upper().strip()
+    # Replace multiple spaces with single
+    while "  " in s:
+        s = s.replace("  ", " ")
+    return s
+
+
 # ---------- STEP 1: FLATTEN / UNMERGE MERGED CELLS ----------
 
 def flatten_merged_cells(input_file, sheet_name="NAV Data"):
@@ -56,6 +74,7 @@ def extract_nav_data(excel_file, sheet_name="NAV Data"):
     2) Read with pandas
     3) Detect header row (contains 'NAV Name')
     4) Keep only rows with NAV values
+    Returns: DataFrame with columns ['Mutual Fund Name', 'NAV', 'Key']
     """
     # First flatten merged cells into a temp file
     flat_file = flatten_merged_cells(excel_file, sheet_name=sheet_name)
@@ -108,20 +127,27 @@ def extract_nav_data(excel_file, sheet_name="NAV Data"):
     # Drop blank fund names
     df = df[df["Mutual Fund Name"].notna()]
 
-    # Drop duplicate fund names if any
-    df = df.drop_duplicates(subset=["Mutual Fund Name"])
+    # Normalize name for matching
+    df["Key"] = df["Mutual Fund Name"].apply(normalize_name)
+
+    # Drop rows where key could not be generated
+    df = df[df["Key"].notna()]
+
+    # Drop duplicate keys (if any)
+    df = df.drop_duplicates(subset=["Key"])
 
     return df
 
 
-# ---------- STEP 3: FORMAT THE OUTPUT EXCEL ----------
+# ---------- STEP 3: FORMAT THE OUTPUT EXCEL (ONLY MAIN SHEET) ----------
 
-def format_excel_output(df, output_file):
-    # Write to Excel
-    df.to_excel(output_file, index=False, sheet_name="NAV Comparison")
-
+def format_excel_output(output_file, sheet_name="NAV Comparison"):
     wb = openpyxl.load_workbook(output_file)
-    ws = wb.active
+    if sheet_name not in wb.sheetnames:
+        wb.save(output_file)
+        return
+
+    ws = wb[sheet_name]
 
     header_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF")
@@ -174,37 +200,66 @@ def format_excel_output(df, output_file):
     wb.save(output_file)
 
 
-# ---------- STEP 4: MAIN COMPARISON LOGIC ----------
+# ---------- STEP 4: MAIN COMPARISON LOGIC + OUTLIER LISTS ----------
 
 def compare_nav_files(latest_file, past_file, output_file="NAV_Comparison_Result.xlsx"):
+    # Extract clean data from both files
     latest_df = extract_nav_data(latest_file)
-    past_df = extract_nav_data(past_file)
+    past_df   = extract_nav_data(past_file)
 
+    # Rename NAV columns for clarity
     latest_df = latest_df.rename(columns={"NAV": "Latest NAV"})
-    past_df = past_df.rename(columns={"NAV": "Past NAV"})
+    past_df   = past_df.rename(columns={"NAV": "Past NAV"})
 
+    # LEFT JOIN on normalized key so all latest schemes are kept
     merged = pd.merge(
-        latest_df,
-        past_df[["Mutual Fund Name", "Past NAV"]],
-        on="Mutual Fund Name",
-        how="inner"
+        latest_df[["Key", "Mutual Fund Name", "Latest NAV"]],
+        past_df[["Key", "Past NAV"]],
+        on="Key",
+        how="left"
     )
 
+    # Compute Change and Change %
     merged["Change"] = merged["Latest NAV"] - merged["Past NAV"]
     merged["Change %"] = (merged["Change"] / merged["Past NAV"] * 100)
 
     # Rounding
     merged["Latest NAV"] = merged["Latest NAV"].round(4)
-    merged["Past NAV"] = merged["Past NAV"].round(4)
-    merged["Change"] = merged["Change"].round(4)
-    merged["Change %"] = merged["Change %"].round(2)
+    merged["Past NAV"]   = merged["Past NAV"].round(4)
+    merged["Change"]     = merged["Change"].round(4)
+    merged["Change %"]   = merged["Change %"].round(2)
 
-    # Final column order & sorting
+    # Final column order & sorting (missing % at bottom)
     merged = merged[
         ["Mutual Fund Name", "Latest NAV", "Past NAV", "Change", "Change %"]
-    ].sort_values("Change %", ascending=False)
+    ].sort_values("Change %", ascending=False, na_position="last")
 
-    format_excel_output(merged, output_file)
+    # ---- Outlier lists ----
+    # Schemes present in latest but NOT in past
+    missing_in_past = latest_df[~latest_df["Key"].isin(past_df["Key"])][
+        ["Mutual Fund Name", "Latest NAV"]
+    ].sort_values("Mutual Fund Name")
+
+    # Schemes present in past but NOT in latest
+    missing_in_latest = past_df[~past_df["Key"].isin(latest_df["Key"])][
+        ["Mutual Fund Name", "Past NAV"]
+    ].sort_values("Mutual Fund Name")
+
+    # ---- Write all sheets ----
+    with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
+        # Main comparison
+        merged.to_excel(writer, sheet_name="NAV Comparison", index=False)
+
+        # Outlier sheets (only if non-empty)
+        if not missing_in_past.empty:
+            missing_in_past.to_excel(writer, sheet_name="Missing_in_Past", index=False)
+
+        if not missing_in_latest.empty:
+            missing_in_latest.to_excel(writer, sheet_name="Missing_in_Latest", index=False)
+
+    # Apply formatting to main sheet
+    format_excel_output(output_file, sheet_name="NAV Comparison")
+
     return merged
 
 
