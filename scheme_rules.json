@@ -1,16 +1,23 @@
 {
+  "_description": "Configuration controlling scheme grouping, exclusion, variant selection, and classification. Python reads this file as rules only.",
+
   "base_scheme_remove_terms": [
     "DIRECT PLAN",
     "REGULAR PLAN",
     "GROWTH",
-    "IDCW"
+    "IDCW",
+    "OPTION"
   ],
+
+  "_base_scheme_remove_terms_desc": "Terms removed from scheme names to identify the base scheme for grouping variants.",
 
   "exclusion_rules": {
     "contains_any": [
       "IDCW"
     ]
   },
+
+  "_exclusion_rules_desc": "Schemes containing any of these keywords are excluded completely before comparison.",
 
   "selection_rules": {
     "preferred_variant": {
@@ -21,15 +28,13 @@
     }
   },
 
+  "_selection_rules_desc": "When multiple variants exist for the same base scheme, the one matching all these keywords is retained.",
+
   "type_rules": {
-    "Gold": [
-      "GOLD"
-    ],
-    "Silver": [
-      "SILVER"
-    ],
-    "ETF": [
-      "ETF"
-    ]
-  }
+    "Gold": ["GOLD"],
+    "Silver": ["SILVER"],
+    "ETF": ["ETF"]
+  },
+
+  "_type_rules_desc": "Scheme classification rules based on keywords found in scheme name."
 }
