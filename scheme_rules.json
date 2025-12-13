@@ -1,14 +1,35 @@
 {
-  "exclude_keywords": [
-    "IDCW" , "Direct Plan"
+  "base_scheme_remove_terms": [
+    "DIRECT PLAN",
+    "REGULAR PLAN",
+    "GROWTH",
+    "IDCW"
   ],
-  "preferred_variant": {
-    "plan": "REGULAR PLAN",
-    "option": "GROWTH"
+
+  "exclusion_rules": {
+    "contains_any": [
+      "IDCW"
+    ]
   },
-  "type_mapping": {
-    "GOLD": "Gold",
-    "SILVER": "Silver",
-    "ETF": "ETF"
+
+  "selection_rules": {
+    "preferred_variant": {
+      "must_contain_all": [
+        "REGULAR PLAN",
+        "GROWTH"
+      ]
+    }
+  },
+
+  "type_rules": {
+    "Gold": [
+      "GOLD"
+    ],
+    "Silver": [
+      "SILVER"
+    ],
+    "ETF": [
+      "ETF"
+    ]
   }
 }
