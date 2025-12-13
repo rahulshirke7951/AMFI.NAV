@@ -4,13 +4,20 @@ import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-# ---------- LOAD JSON RULES ----------
+# =========================================================
+# LOAD JSON RULES (PATH SAFE – GITHUB READY)
+# =========================================================
 
-with open("scheme_rules.json", "r") as f:
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+RULES_PATH = os.path.join(BASE_DIR, "scheme_rules.json")
+
+with open(RULES_PATH, "r") as f:
     RULES = json.load(f)
 
 
-# ---------- HELPERS ----------
+# =========================================================
+# GENERIC RULE ENGINE HELPERS
+# =========================================================
 
 def normalize_name(s):
     if pd.isna(s):
@@ -22,8 +29,8 @@ def normalize_name(s):
 
 
 def extract_base_scheme(name):
-    s = str(name).upper()
-    for term in ["DIRECT PLAN", "REGULAR PLAN", "GROWTH", "IDCW"]:
+    s = name.upper()
+    for term in RULES["base_scheme_remove_terms"]:
         s = s.replace(term, "")
     s = s.replace(" - ", " ").strip()
     while "  " in s:
@@ -33,26 +40,30 @@ def extract_base_scheme(name):
 
 def is_excluded(name):
     n = name.upper()
-    return any(k in n for k in RULES["exclude_keywords"])
+    rules = RULES.get("exclusion_rules", {})
+    for k in rules.get("contains_any", []):
+        if k in n:
+            return True
+    return False
 
 
 def is_preferred_variant(name):
     n = name.upper()
-    return (
-        RULES["preferred_variant"]["plan"] in n and
-        RULES["preferred_variant"]["option"] in n
-    )
+    must_have = RULES["selection_rules"]["preferred_variant"]["must_contain_all"]
+    return all(k in n for k in must_have)
 
 
 def detect_scheme_type(name):
     n = name.upper()
-    for k, v in RULES["type_mapping"].items():
-        if k in n:
-            return v
+    for scheme_type, keywords in RULES["type_rules"].items():
+        if any(k in n for k in keywords):
+            return scheme_type
     return "Other"
 
 
-# ---------- FLATTEN MERGED CELLS ----------
+# =========================================================
+# FLATTEN MERGED CELLS
+# =========================================================
 
 def flatten_merged_cells(input_file, sheet_name="NAV Data"):
     wb = openpyxl.load_workbook(input_file)
@@ -72,14 +83,20 @@ def flatten_merged_cells(input_file, sheet_name="NAV Data"):
     return out
 
 
-# ---------- EXTRACT + FILTER ----------
+# =========================================================
+# EXTRACT + APPLY RULES
+# =========================================================
 
 def extract_nav_data(excel_file, sheet_name="NAV Data"):
     flat = flatten_merged_cells(excel_file, sheet_name)
+
     df_raw = pd.read_excel(flat, sheet_name=sheet_name, header=None).dropna(how="all")
 
     header_row = df_raw[
-        df_raw.apply(lambda r: r.astype(str).str.contains("NAV Name", case=False).any(), axis=1)
+        df_raw.apply(
+            lambda r: r.astype(str).str.contains("NAV Name", case=False).any(),
+            axis=1
+        )
     ].index[0]
 
     df_raw.columns = df_raw.iloc[header_row]
@@ -88,9 +105,9 @@ def extract_nav_data(excel_file, sheet_name="NAV Data"):
     df = df[["NAV Name", "Net Asset Value"]]
     df.columns = ["Mutual Fund Name", "NAV"]
     df["NAV"] = pd.to_numeric(df["NAV"], errors="coerce")
-    df = df.dropna()
+    df = df.dropna(subset=["NAV", "Mutual Fund Name"])
 
-    # ---- Drop IDCW completely ----
+    # ---------- RULE APPLICATION ----------
     df = df[~df["Mutual Fund Name"].apply(is_excluded)]
 
     df["Base Scheme"] = df["Mutual Fund Name"].apply(extract_base_scheme)
@@ -103,10 +120,10 @@ def extract_nav_data(excel_file, sheet_name="NAV Data"):
         if len(grp) == 1:
             final_rows.append(grp.iloc[0])
         else:
-            pref = grp[grp["Mutual Fund Name"].apply(is_preferred_variant)]
-            if not pref.empty:
-                final_rows.append(pref.iloc[0])
-                excluded_rows.append(grp.drop(pref.index))
+            preferred = grp[grp["Mutual Fund Name"].apply(is_preferred_variant)]
+            if not preferred.empty:
+                final_rows.append(preferred.iloc[0])
+                excluded_rows.append(grp.drop(preferred.index))
             else:
                 final_rows.append(grp.iloc[0])
                 excluded_rows.append(grp.iloc[1:])
@@ -117,10 +134,15 @@ def extract_nav_data(excel_file, sheet_name="NAV Data"):
         if excluded_rows else pd.DataFrame(columns=df.columns)
     )
 
-    return final_df.drop(columns=["Base Scheme"]), excluded_df.drop(columns=["Base Scheme"])
+    return (
+        final_df.drop(columns=["Base Scheme"]),
+        excluded_df.drop(columns=["Base Scheme"])
+    )
 
 
-# ---------- FORMAT OUTPUT ----------
+# =========================================================
+# FORMAT OUTPUT
+# =========================================================
 
 def format_excel_output(file):
     wb = openpyxl.load_workbook(file)
@@ -143,15 +165,16 @@ def format_excel_output(file):
         for i, c in enumerate(r, 1):
             c.border = border
             c.alignment = Alignment(horizontal="left" if i == 1 else "right")
-            if i == 6:
-                if isinstance(c.value, (int, float)):
-                    c.fill = green if c.value > 0 else red
-                    c.font = Font(bold=True)
+            if i == 6 and isinstance(c.value, (int, float)):
+                c.fill = green if c.value > 0 else red
+                c.font = Font(bold=True)
 
     wb.save(file)
 
 
-# ---------- COMPARE ----------
+# =========================================================
+# COMPARE NAV FILES
+# =========================================================
 
 def compare_nav_files(latest, past, output="NAV_Comparison_Result.xlsx"):
     l_df, l_exc = extract_nav_data(latest)
@@ -182,7 +205,9 @@ def compare_nav_files(latest, past, output="NAV_Comparison_Result.xlsx"):
     format_excel_output(output)
 
 
-# ---------- RUN ----------
+# =========================================================
+# ENTRY POINT
+# =========================================================
 
 if __name__ == "__main__":
     compare_nav_files(
