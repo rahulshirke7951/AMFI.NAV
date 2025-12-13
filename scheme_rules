@@ -1,0 +1,14 @@
+{
+  "exclude_keywords": [
+    "IDCW"
+  ],
+  "preferred_variant": {
+    "plan": "REGULAR PLAN",
+    "option": "GROWTH"
+  },
+  "type_mapping": {
+    "GOLD": "Gold",
+    "SILVER": "Silver",
+    "ETF": "ETF"
+  }
+}
