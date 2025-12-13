@@ -1,11 +1,12 @@
 import os
 import json
+import warnings
 import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # =========================================================
-# LOAD JSON RULES (PATH SAFE – GITHUB READY)
+# LOAD JSON RULES (PATH SAFE)
 # =========================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -14,9 +15,36 @@ RULES_PATH = os.path.join(BASE_DIR, "scheme_rules.json")
 with open(RULES_PATH, "r") as f:
     RULES = json.load(f)
 
+# =========================================================
+# RULE VALIDATION (WARNINGS ONLY)
+# =========================================================
+
+def validate_rules(rules):
+    warnings_list = []
+
+    if not rules.get("base_scheme_remove_terms"):
+        warnings_list.append("base_scheme_remove_terms is empty")
+
+    sel = rules.get("selection_rules", {}).get("preferred_variant", {})
+    if not sel.get("must_contain_all"):
+        warnings_list.append("preferred_variant.must_contain_all is empty")
+
+    type_keywords = {}
+    for t, keys in rules.get("type_rules", {}).items():
+        for k in keys:
+            if k in type_keywords:
+                warnings_list.append(
+                    f"Keyword '{k}' used in both '{type_keywords[k]}' and '{t}'"
+                )
+            type_keywords[k] = t
+
+    for w in warnings_list:
+        warnings.warn(f"[RULE WARNING] {w}")
+
+validate_rules(RULES)
 
 # =========================================================
-# GENERIC RULE ENGINE HELPERS
+# RULE ENGINE HELPERS
 # =========================================================
 
 def normalize_name(s):
@@ -30,21 +58,24 @@ def normalize_name(s):
 
 def extract_base_scheme(name):
     s = name.upper()
+    for ch in ["-", "–", "—"]:
+        s = s.replace(ch, " ")
+
     for term in RULES["base_scheme_remove_terms"]:
         s = s.replace(term, "")
-    s = s.replace(" - ", " ").strip()
+
     while "  " in s:
         s = s.replace("  ", " ")
-    return s
+
+    return s.strip()
 
 
 def is_excluded(name):
     n = name.upper()
-    rules = RULES.get("exclusion_rules", {})
-    for k in rules.get("contains_any", []):
+    for k in RULES.get("exclusion_rules", {}).get("contains_any", []):
         if k in n:
-            return True
-    return False
+            return True, f"Excluded by rule: contains '{k}'"
+    return False, None
 
 
 def is_preferred_variant(name):
@@ -84,7 +115,7 @@ def flatten_merged_cells(input_file, sheet_name="NAV Data"):
 
 
 # =========================================================
-# EXTRACT + APPLY RULES
+# EXTRACT & APPLY SCHEME RULES
 # =========================================================
 
 def extract_nav_data(excel_file, sheet_name="NAV Data"):
@@ -107,14 +138,26 @@ def extract_nav_data(excel_file, sheet_name="NAV Data"):
     df["NAV"] = pd.to_numeric(df["NAV"], errors="coerce")
     df = df.dropna(subset=["NAV", "Mutual Fund Name"])
 
-    # ---------- RULE APPLICATION ----------
-    df = df[~df["Mutual Fund Name"].apply(is_excluded)]
+    included_rows = []
+    excluded_rows = []
+
+    for _, row in df.iterrows():
+        excluded, reason = is_excluded(row["Mutual Fund Name"])
+        if excluded:
+            r = row.to_dict()
+            r["Reason"] = reason
+            excluded_rows.append(r)
+        else:
+            included_rows.append(row)
+
+    df = pd.DataFrame(included_rows)
 
     df["Base Scheme"] = df["Mutual Fund Name"].apply(extract_base_scheme)
     df["Type"] = df["Mutual Fund Name"].apply(detect_scheme_type)
     df["Key"] = df["Mutual Fund Name"].apply(normalize_name)
 
-    final_rows, excluded_rows = [], []
+    final_rows = []
+    variant_excluded = []
 
     for base, grp in df.groupby("Base Scheme"):
         if len(grp) == 1:
@@ -123,20 +166,30 @@ def extract_nav_data(excel_file, sheet_name="NAV Data"):
             preferred = grp[grp["Mutual Fund Name"].apply(is_preferred_variant)]
             if not preferred.empty:
                 final_rows.append(preferred.iloc[0])
-                excluded_rows.append(grp.drop(preferred.index))
+                for _, r in grp.drop(preferred.index).iterrows():
+                    d = r.to_dict()
+                    d["Reason"] = "Excluded: non-preferred variant"
+                    variant_excluded.append(d)
             else:
                 final_rows.append(grp.iloc[0])
-                excluded_rows.append(grp.iloc[1:])
+                for _, r in grp.iloc[1:].iterrows():
+                    d = r.to_dict()
+                    d["Reason"] = "Excluded: non-preferred variant"
+                    variant_excluded.append(d)
 
     final_df = pd.DataFrame(final_rows).reset_index(drop=True)
-    excluded_df = (
-        pd.concat(excluded_rows).reset_index(drop=True)
-        if excluded_rows else pd.DataFrame(columns=df.columns)
+
+    excluded_df = pd.concat(
+        [
+            pd.DataFrame(excluded_rows),
+            pd.DataFrame(variant_excluded)
+        ],
+        ignore_index=True
     )
 
     return (
         final_df.drop(columns=["Base Scheme"]),
-        excluded_df.drop(columns=["Base Scheme"])
+        excluded_df.drop(columns=["Base Scheme"], errors="ignore")
     )
 
 
@@ -193,14 +246,24 @@ def compare_nav_files(latest, past, output="NAV_Comparison_Result.xlsx"):
     merged["Change"] = merged["Latest NAV"] - merged["Past NAV"]
     merged["Change %"] = (merged["Change"] / merged["Past NAV"] * 100).round(2)
 
-    merged = merged[
+    non_comparable = merged[
+        merged["Latest NAV"].isna() | merged["Past NAV"].isna()
+    ].copy()
+
+    non_comparable["Reason"] = "Excluded: missing Latest or Past NAV"
+
+    comparable = merged.drop(non_comparable.index).copy()
+
+    comparable = comparable[
         ["Mutual Fund Name", "Type", "Latest NAV", "Past NAV", "Change", "Change %"]
-    ].sort_values("Change %", ascending=False, na_position="last")
+    ].sort_values("Change %", ascending=False)
 
     with pd.ExcelWriter(output, engine="openpyxl") as w:
-        merged.to_excel(w, "NAV Comparison", index=False)
-        l_exc.to_excel(w, "Excluded_Latest", index=False)
-        p_exc.to_excel(w, "Excluded_Past", index=False)
+        comparable.to_excel(w, "NAV Comparison", index=False)
+        l_exc.to_excel(w, "Excluded_Scheme_Rules", index=False)
+        p_exc.to_excel(w, "Excluded_Scheme_Rules_Past", index=False)
+        if not non_comparable.empty:
+            non_comparable.to_excel(w, "Excluded_Not_Comparable", index=False)
 
     format_excel_output(output)
 
