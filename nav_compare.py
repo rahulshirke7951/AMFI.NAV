@@ -121,54 +121,48 @@ def extract(file):
     return final_df, excluded_df, total_raw
 
 # ======================================================
-# FORMAT NAV COMPARISON
+# ADVISORY
 # ======================================================
 
-def format_nav_sheet(wb):
-    ws = wb["NAV Comparison"]
-    nav_fmt = FORMAT["nav_comparison"]
+def build_advisory(comp_df):
+    rows = []
 
-    border = Border(*(Side(style="thin"),) * 4)
-    hdr = nav_fmt["header"]
+    if comp_df.empty:
+        return pd.DataFrame(columns=["Section", "Message"])
 
-    for c in ws[1]:
-        c.fill = PatternFill("solid", fgColor=hdr["fill_color"])
-        c.font = Font(bold=hdr["bold"], color=hdr["font_color"])
-        c.alignment = Alignment(horizontal=hdr["align"])
-        c.border = border
+    strong = comp_df[comp_df["Change %"] >= 5]
+    weak = comp_df[comp_df["Change %"] <= -5]
+    stable = comp_df[comp_df["Change %"].abs() < 1]
 
-    widths = nav_fmt["column_widths"]
-    headers = [c.value for c in ws[1]]
+    rows.append(["Strong Performers",
+                 f"{len(strong)} schemes gained more than 5% in the period."])
 
-    for i, h in enumerate(headers, 1):
-        if h in widths:
-            ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = widths[h]
+    rows.append(["Area of Attention",
+                 f"{len(weak)} schemes declined more than -5% and may require review."])
 
-    pos = PatternFill("solid", fgColor=nav_fmt["change_percent_colors"]["positive"])
-    neg = PatternFill("solid", fgColor=nav_fmt["change_percent_colors"]["negative"])
+    rows.append(["Stable Schemes",
+                 f"{len(stable)} schemes moved within ±1%, indicating stability."])
 
-    for r in ws.iter_rows(min_row=2):
-        for c in r:
-            c.border = border
-        cp = r[headers.index("Change %")]
-        if isinstance(cp.value, (int, float)):
-            cp.fill = pos if cp.value > 0 else neg
+    cat = comp_df.groupby("Type")["Change %"].mean().round(2)
+    for t, v in cat.items():
+        rows.append(["Category Insight",
+                     f"{t} schemes averaged {v}% change in NAV."])
+
+    return pd.DataFrame(rows, columns=["Section", "Message"])
 
 # ======================================================
 # RECONCILIATION
 # ======================================================
 
-def reconciliation(lat_raw, past_raw, comp, excl_rules, excl_nc):
+def reconciliation(lat_raw, past_raw, comp, excl_rules, excl_zero, excl_nc):
     rows = []
-    for label, raw, inc, exc_r, exc_nc in [
-        ("Latest", lat_raw, len(comp), len(excl_rules), len(excl_nc)),
-        ("Past", past_raw, len(comp), len(excl_rules), len(excl_nc))
-    ]:
+    for label, raw in [("Latest", lat_raw), ("Past", past_raw)]:
         rows.extend([
             [label, "Total Raw", raw],
-            [label, "Included in NAV Comparison", inc],
-            [label, "Excluded – Scheme Rules", exc_r],
-            [label, "Excluded – Not Comparable", exc_nc],
+            [label, "Included in NAV Comparison", len(comp)],
+            [label, "Excluded – Scheme Rules", len(excl_rules)],
+            [label, "Excluded – Zero NAV", len(excl_zero)],
+            [label, "Excluded – Not Comparable", len(excl_nc)],
             [label, "Total Check", raw]
         ])
     return pd.DataFrame(rows, columns=["File Type", "Category", "Count"])
@@ -184,28 +178,37 @@ def run(latest, past):
     l_df = l_df.rename(columns={"NAV": "Latest NAV"})
     p_df = p_df.rename(columns={"NAV": "Past NAV"})
 
-    m = pd.merge(l_df, p_df[["Key", "Past NAV"]], on="Key", how="left")
-    m["Change"] = m["Latest NAV"] - m["Past NAV"]
-    m["Change %"] = (m["Change"] / m["Past NAV"] * 100).round(2)
+    merged = pd.merge(l_df, p_df[["Key", "Past NAV"]], on="Key", how="left")
 
-    non_comp = m[m["Past NAV"].isna()].copy()
-    non_comp["Reason"] = "Excluded: missing Past NAV"
+    # Missing NAV
+    excl_nc = merged[merged["Past NAV"].isna()].copy()
+    excl_nc["Reason"] = "Excluded: missing Past NAV"
 
-    comp = m.drop(non_comp.index)[
+    merged = merged.drop(excl_nc.index)
+
+    # Zero NAV
+    excl_zero = merged[(merged["Latest NAV"] == 0) | (merged["Past NAV"] == 0)].copy()
+    excl_zero["Reason"] = "Excluded: Zero NAV"
+
+    merged = merged.drop(excl_zero.index)
+
+    merged["Change"] = merged["Latest NAV"] - merged["Past NAV"]
+    merged["Change %"] = (merged["Change"] / merged["Past NAV"] * 100).round(2)
+
+    comp = merged[
         ["Mutual Fund Name", "Type", "Latest NAV", "Past NAV", "Change", "Change %"]
-    ]
+    ].sort_values("Change %", ascending=False)
 
-    recon = reconciliation(l_raw, p_raw, comp, l_exc, non_comp)
+    recon = reconciliation(l_raw, p_raw, comp, l_exc, excl_zero, excl_nc)
+    advisory = build_advisory(comp)
 
     with pd.ExcelWriter("NAV_Comparison_Result.xlsx", engine="openpyxl") as w:
         comp.to_excel(w, "NAV Comparison", index=False)
         l_exc.to_excel(w, "Excluded_Scheme_Rules", index=False)
-        non_comp.to_excel(w, "Excluded_Not_Comparable", index=False)
+        excl_zero.to_excel(w, "Excluded_Zero_NAV", index=False)
+        excl_nc.to_excel(w, "Excluded_Not_Comparable", index=False)
         recon.to_excel(w, "Reconciliation", index=False)
-
-    wb = openpyxl.load_workbook("NAV_Comparison_Result.xlsx")
-    format_nav_sheet(wb)
-    wb.save("NAV_Comparison_Result.xlsx")
+        advisory.to_excel(w, "Advisory", index=False)
 
 # ======================================================
 # ENTRY
