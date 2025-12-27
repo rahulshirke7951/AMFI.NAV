@@ -1,52 +1,38 @@
 import os
 import json
-import warnings
 import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-# ===================== CONFIG =====================
-DEBUG = True   # <<<<<< TURN OFF IN PROD
-# ==================================================
+DEBUG = True
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-RULES_PATH = os.path.join(BASE_DIR, "scheme_rules.json")
 
-with open(RULES_PATH, "r") as f:
+with open(os.path.join(BASE_DIR, "scheme_rules.json")) as f:
     RULES = json.load(f)
 
-# ===================== RULE VALIDATION =====================
+with open(os.path.join(BASE_DIR, "formatting_rules.json")) as f:
+    FORMAT = json.load(f)
 
-def validate_rules(rules):
-    if not rules.get("selection_rules", {}).get("priority_ladder"):
-        warnings.warn("Priority ladder is empty – selection may be ambiguous")
+# ======================================================
+# HELPERS
+# ======================================================
 
-    seen = {}
-    for t, keys in rules.get("type_rules", {}).items():
-        for k in keys:
-            if k in seen:
-                warnings.warn(f"Keyword '{k}' used in both '{seen[k]}' and '{t}'")
-            seen[k] = t
-
-validate_rules(RULES)
-
-# ===================== HELPERS =====================
-
-def normalize_name(s):
+def normalize(s):
     return " ".join(str(s).upper().split())
 
 def clean_text(s):
     for ch in ["-", "–", "—"]:
         s = s.replace(ch, " ")
-    return normalize_name(s)
+    return normalize(s)
 
 def extract_base_scheme(name):
     s = clean_text(name)
-    for term in RULES["base_scheme_remove_terms"]:
-        s = s.replace(term, "")
-    return normalize_name(s)
+    for t in RULES["base_scheme_remove_terms"]:
+        s = s.replace(t, "")
+    return normalize(s)
 
-def detect_scheme_type(name):
+def detect_type(name):
     n = name.upper()
     for t, keys in RULES["type_rules"].items():
         if any(k in n for k in keys):
@@ -54,45 +40,42 @@ def detect_scheme_type(name):
     return "Other"
 
 def exclusion_reason(name):
-    for k in RULES.get("exclusion_rules", {}).get("contains_any", []):
+    for k in RULES["exclusion_rules"]["contains_any"]:
         if k in name.upper():
-            return f"Excluded by rule: contains '{k}'"
+            return f"Excluded by rule: contains {k}"
     return None
 
-def select_variant(grp, trace):
-    for rank, rule in enumerate(RULES["selection_rules"]["priority_ladder"], 1):
-        matches = grp[
-            grp["Mutual Fund Name"].str.upper().apply(
-                lambda x: all(k in x for k in rule)
-            )
-        ]
-        if not matches.empty:
-            trace.append(f"Selected by priority {rank}: {rule}")
-            return matches.iloc[0], grp.drop(matches.index)
-    trace.append("No priority match – defaulted to first scheme")
+def select_variant(grp):
+    for rule in RULES["selection_rules"]["priority_ladder"]:
+        m = grp[grp["Mutual Fund Name"].str.upper().apply(lambda x: all(k in x for k in rule))]
+        if not m.empty:
+            return m.iloc[0], grp.drop(m.index)
     return grp.iloc[0], grp.iloc[1:]
 
-# ===================== FLATTEN MERGES =====================
+# ======================================================
+# FLATTEN MERGES
+# ======================================================
 
-def flatten_merged_cells(file, sheet="NAV Data"):
+def flatten(file, sheet="NAV Data"):
     wb = openpyxl.load_workbook(file)
     ws = wb[sheet]
     for m in list(ws.merged_cells.ranges):
-        r1, c1, r2, c2 = m.min_row, m.min_col, m.max_row, m.max_col
-        val = ws.cell(r1, c1).value
+        v = ws.cell(m.min_row, m.min_col).value
         ws.unmerge_cells(str(m))
-        for r in range(r1, r2 + 1):
-            for c in range(c1, c2 + 1):
-                ws.cell(r, c).value = val
+        for r in range(m.min_row, m.max_row + 1):
+            for c in range(m.min_col, m.max_col + 1):
+                ws.cell(r, c).value = v
     out = file.replace(".xlsx", "_flat.xlsx")
     wb.save(out)
     return out
 
-# ===================== EXTRACT =====================
+# ======================================================
+# EXTRACT
+# ======================================================
 
-def extract_nav_data(file):
-    flat = flatten_merged_cells(file)
-    raw = pd.read_excel(flat, header=None).dropna(how="all")
+def extract(file):
+    raw_flat = flatten(file)
+    raw = pd.read_excel(raw_flat, header=None).dropna(how="all")
 
     hdr = raw[raw.apply(lambda r: r.astype(str).str.contains("NAV Name", case=False).any(), axis=1)].index[0]
     raw.columns = raw.iloc[hdr]
@@ -100,6 +83,8 @@ def extract_nav_data(file):
     df.columns = ["Mutual Fund Name", "NAV"]
     df["NAV"] = pd.to_numeric(df["NAV"], errors="coerce")
     df = df.dropna()
+
+    total_raw = len(df)
 
     included, excluded = [], []
 
@@ -114,59 +99,87 @@ def extract_nav_data(file):
 
     df = pd.DataFrame(included)
     df["Base"] = df["Mutual Fund Name"].apply(extract_base_scheme)
-    df["Type"] = df["Mutual Fund Name"].apply(detect_scheme_type)
-    df["Key"] = df["Mutual Fund Name"].apply(normalize_name)
+    df["Type"] = df["Mutual Fund Name"].apply(detect_type)
+    df["Key"] = df["Mutual Fund Name"].apply(normalize)
 
-    final, variant_excl, traces = [], [], []
+    final, var_excl = [], []
 
-    for base, grp in df.groupby("Base"):
-        trace = [f"Base Scheme: {base}"]
+    for _, grp in df.groupby("Base"):
         if len(grp) == 1:
             final.append(grp.iloc[0])
-            trace.append("Only one variant – kept")
         else:
-            keep, drop = select_variant(grp, trace)
+            keep, drop = select_variant(grp)
             final.append(keep)
             for _, d in drop.iterrows():
                 e = d.to_dict()
                 e["Reason"] = "Excluded: non-preferred variant"
-                variant_excl.append(e)
-        if DEBUG:
-            traces.append({"Base Scheme": base, "Decision Trace": " | ".join(trace)})
+                var_excl.append(e)
 
-    return (
-        pd.DataFrame(final),
-        pd.concat([pd.DataFrame(excluded), pd.DataFrame(variant_excl)], ignore_index=True),
-        pd.DataFrame(traces)
-    )
+    final_df = pd.DataFrame(final)
+    excluded_df = pd.concat([pd.DataFrame(excluded), pd.DataFrame(var_excl)], ignore_index=True)
 
-# ===================== FORMAT =====================
+    return final_df, excluded_df, total_raw
 
-def format_excel(file):
-    wb = openpyxl.load_workbook(file)
+# ======================================================
+# FORMAT NAV COMPARISON
+# ======================================================
 
-    color_map = {
-        "Excluded by rule": "FFC7CE",
-        "non-preferred": "FFEB9C",
-        "missing": "D9D9D9"
-    }
+def format_nav_sheet(wb):
+    ws = wb["NAV Comparison"]
+    nav_fmt = FORMAT["nav_comparison"]
 
-    for sheet in wb.sheetnames:
-        ws = wb[sheet]
-        if "Excluded" in sheet and "Reason" in ws[1]:
-            col = [c.value for c in ws[1]].index("Reason") + 1
-            for r in ws.iter_rows(min_row=2):
-                for k, clr in color_map.items():
-                    if k.lower() in str(r[col - 1].value).lower():
-                        r[col - 1].fill = PatternFill("solid", fgColor=clr)
+    border = Border(*(Side(style="thin"),) * 4)
+    hdr = nav_fmt["header"]
 
-    wb.save(file)
+    for c in ws[1]:
+        c.fill = PatternFill("solid", fgColor=hdr["fill_color"])
+        c.font = Font(bold=hdr["bold"], color=hdr["font_color"])
+        c.alignment = Alignment(horizontal=hdr["align"])
+        c.border = border
 
-# ===================== COMPARE =====================
+    widths = nav_fmt["column_widths"]
+    headers = [c.value for c in ws[1]]
 
-def compare(latest, past):
-    l_df, l_exc, l_trace = extract_nav_data(latest)
-    p_df, p_exc, _ = extract_nav_data(past)
+    for i, h in enumerate(headers, 1):
+        if h in widths:
+            ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = widths[h]
+
+    pos = PatternFill("solid", fgColor=nav_fmt["change_percent_colors"]["positive"])
+    neg = PatternFill("solid", fgColor=nav_fmt["change_percent_colors"]["negative"])
+
+    for r in ws.iter_rows(min_row=2):
+        for c in r:
+            c.border = border
+        cp = r[headers.index("Change %")]
+        if isinstance(cp.value, (int, float)):
+            cp.fill = pos if cp.value > 0 else neg
+
+# ======================================================
+# RECONCILIATION
+# ======================================================
+
+def reconciliation(lat_raw, past_raw, comp, excl_rules, excl_nc):
+    rows = []
+    for label, raw, inc, exc_r, exc_nc in [
+        ("Latest", lat_raw, len(comp), len(excl_rules), len(excl_nc)),
+        ("Past", past_raw, len(comp), len(excl_rules), len(excl_nc))
+    ]:
+        rows.extend([
+            [label, "Total Raw", raw],
+            [label, "Included in NAV Comparison", inc],
+            [label, "Excluded – Scheme Rules", exc_r],
+            [label, "Excluded – Not Comparable", exc_nc],
+            [label, "Total Check", raw]
+        ])
+    return pd.DataFrame(rows, columns=["File Type", "Category", "Count"])
+
+# ======================================================
+# MAIN
+# ======================================================
+
+def run(latest, past):
+    l_df, l_exc, l_raw = extract(latest)
+    p_df, p_exc, p_raw = extract(past)
 
     l_df = l_df.rename(columns={"NAV": "Latest NAV"})
     p_df = p_df.rename(columns={"NAV": "Past NAV"})
@@ -175,21 +188,28 @@ def compare(latest, past):
     m["Change"] = m["Latest NAV"] - m["Past NAV"]
     m["Change %"] = (m["Change"] / m["Past NAV"] * 100).round(2)
 
-    not_comp = m[m["Past NAV"].isna()].copy()
-    not_comp["Reason"] = "Excluded: missing Past NAV"
+    non_comp = m[m["Past NAV"].isna()].copy()
+    non_comp["Reason"] = "Excluded: missing Past NAV"
 
-    comp = m.drop(not_comp.index)
+    comp = m.drop(non_comp.index)[
+        ["Mutual Fund Name", "Type", "Latest NAV", "Past NAV", "Change", "Change %"]
+    ]
+
+    recon = reconciliation(l_raw, p_raw, comp, l_exc, non_comp)
 
     with pd.ExcelWriter("NAV_Comparison_Result.xlsx", engine="openpyxl") as w:
         comp.to_excel(w, "NAV Comparison", index=False)
-        l_exc.to_excel(w, "Excluded_Schemes", index=False)
-        not_comp.to_excel(w, "Excluded_Not_Comparable", index=False)
-        if DEBUG:
-            l_trace.to_excel(w, "Decision_Trace", index=False)
+        l_exc.to_excel(w, "Excluded_Scheme_Rules", index=False)
+        non_comp.to_excel(w, "Excluded_Not_Comparable", index=False)
+        recon.to_excel(w, "Reconciliation", index=False)
 
-    format_excel("NAV_Comparison_Result.xlsx")
+    wb = openpyxl.load_workbook("NAV_Comparison_Result.xlsx")
+    format_nav_sheet(wb)
+    wb.save("NAV_Comparison_Result.xlsx")
 
-# ===================== RUN =====================
+# ======================================================
+# ENTRY
+# ======================================================
 
 if __name__ == "__main__":
-    compare("data/latest_nav.xlsx", "data/past_nav.xlsx")
+    run("data/latest_nav.xlsx", "data/past_nav.xlsx")
