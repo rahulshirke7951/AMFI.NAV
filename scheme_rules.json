@@ -1,5 +1,5 @@
 {
-  "_description": "Configuration controlling scheme grouping, exclusion, variant selection, and classification. Python reads this file as rules only.",
+  "_description": "Central rule configuration for scheme grouping, exclusion, variant selection priority, and classification.",
 
   "base_scheme_remove_terms": [
     "DIRECT PLAN",
@@ -9,7 +9,7 @@
     "OPTION"
   ],
 
-  "_base_scheme_remove_terms_desc": "Terms removed from scheme names to identify the base scheme for grouping variants.",
+  "_base_scheme_remove_terms_desc": "Removed from scheme names to derive base scheme for grouping variants.",
 
   "exclusion_rules": {
     "contains_any": [
@@ -17,18 +17,18 @@
     ]
   },
 
-  "_exclusion_rules_desc": "Schemes containing any of these keywords are excluded completely before comparison.",
+  "_exclusion_rules_desc": "Schemes containing any of these keywords are excluded outright.",
 
   "selection_rules": {
-    "preferred_variant": {
-      "must_contain_all": [
-        "REGULAR PLAN",
-        "GROWTH"
-      ]
-    }
+    "priority_ladder": [
+      ["REGULAR PLAN", "GROWTH"],
+      ["REGULAR PLAN"],
+      ["DIRECT PLAN", "GROWTH"],
+      ["DIRECT PLAN"]
+    ]
   },
 
-  "_selection_rules_desc": "When multiple variants exist for the same base scheme, the one matching all these keywords is retained.",
+  "_selection_rules_desc": "Ordered preference list. First matching variant is selected when multiple variants exist.",
 
   "type_rules": {
     "Gold": ["GOLD"],
@@ -36,5 +36,5 @@
     "ETF": ["ETF"]
   },
 
-  "_type_rules_desc": "Scheme classification rules based on keywords found in scheme name."
+  "_type_rules_desc": "Scheme classification rules based on keywords."
 }
