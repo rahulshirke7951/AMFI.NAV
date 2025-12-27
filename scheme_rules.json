@@ -19,15 +19,20 @@
 
   "_exclusion_rules_desc": "Schemes containing any of these keywords are excluded outright.",
 
-  "selection_rules": {
-    "priority_ladder": [
-      ["REGULAR PLAN", "GROWTH"],
-      ["REGULAR PLAN"],
-      ["DIRECT PLAN", "GROWTH"],
-      ["DIRECT PLAN"]
-    ]
-  },
+"selection_rules": {
+  "priority_ladder": [
+    ["REGULAR PLAN", "GROWTH"],
+    ["REGULAR PLAN"],
+    ["DIRECT PLAN", "GROWTH"],
+    ["DIRECT PLAN"],
 
+    ["REGULAR", "GROWTH"],
+    ["REGULAR"],
+    ["DIRECT", "GROWTH"],
+    ["DIRECT"]
+  ]
+},
+  
   "_selection_rules_desc": "Ordered preference list. First matching variant is selected when multiple variants exist.",
 
   "type_rules": {
