@@ -1,15 +1,15 @@
 {
-  "_description": "Rules for scheme grouping, exclusion, and variant selection. Python uses this only for scheme-level decisions.",
+  "_description": "Rules for scheme grouping, exclusion, and variant selection.",
 
   "base_scheme_remove_terms": [
     "DIRECT PLAN",
     "REGULAR PLAN",
+    "DIRECT",
+    "REGULAR",
     "GROWTH",
     "IDCW",
     "OPTION"
   ],
-
-  "_base_scheme_remove_terms_desc": "Terms removed from scheme names to derive base scheme for grouping variants.",
 
   "exclusion_rules": {
     "contains_any": [
@@ -17,21 +17,12 @@
     ]
   },
 
-  "_exclusion_rules_desc": "Schemes containing any of these keywords are excluded outright.",
-
   "selection_rules": {
     "priority_ladder": [
-      ["REGULAR PLAN", "GROWTH"],
-      ["REGULAR PLAN"],
-      ["DIRECT PLAN", "GROWTH"],
-      ["DIRECT PLAN"],
-
       ["REGULAR", "GROWTH"],
       ["REGULAR"],
       ["DIRECT", "GROWTH"],
       ["DIRECT"]
     ]
-  },
-
-  "_selection_rules_desc": "Ordered preference list. First matching variant is selected when multiple variants exist."
+  }
 }
