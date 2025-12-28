@@ -4,9 +4,7 @@
   "base_scheme_remove_terms": [
     "DIRECT PLAN",
     "REGULAR PLAN",
-    "DIRECT",
-    "REGULAR",
-    "GROWTH",
+     "GROWTH",
     "IDCW",
     "OPTION"
   ],
